@@ -71,6 +71,17 @@ func (r *file[T1]) List(ctx context.Context, visitorFunc func(ctx context.Contex
 	}
 }
 
+func (r *file[T1]) Len(ctx context.Context) int {
+	log := log.FromContext(ctx)
+	items := 0
+	if err := r.visitDir(ctx, func(ctx context.Context, key store.Key, obj T1) {
+		items++
+	}); err != nil {
+		log.Error("cannot list visiting dir failed", "error", err.Error())
+	}
+	return items
+}
+
 func (r *file[T1]) Create(ctx context.Context, key store.Key, data T1) error {
 	// if an error is returned the entry already exists
 	if _, err := r.Get(ctx, key); err == nil {

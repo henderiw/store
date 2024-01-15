@@ -29,6 +29,8 @@ type Storer[T1 any] interface {
 	// Retrieve retrieves data for the given key from the storage
 	List(ctx context.Context, visitorFunc func(context.Context, Key, T1))
 
+	Len(ctx context.Context) int
+
 	// Create data with the given key in the storage
 	Create(ctx context.Context, key Key, data T1) error
 
