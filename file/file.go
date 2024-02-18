@@ -130,6 +130,14 @@ func (r *file[T1]) Update(ctx context.Context, key store.Key, data T1) error {
 	return nil
 }
 
+func (r *file[T1]) UpdateWithKeyFn(ctx context.Context, key store.Key, updateFunc func(ctx context.Context, obj T1) T1) {
+	obj, _ := r.readFile(ctx, key)
+	if updateFunc != nil {
+		obj = updateFunc(ctx, obj)
+		r.update(ctx, key, obj)
+	}
+}
+
 func (r *file[T1]) update(ctx context.Context, key store.Key, newd T1) error {
 	return r.writeFile(ctx, key, newd)
 }

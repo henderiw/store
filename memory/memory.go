@@ -118,6 +118,16 @@ func (r *mem[T1]) Update(ctx context.Context, key store.Key, data T1) error {
 	return nil
 }
 
+func (r *mem[T1]) UpdateWithKeyFn(ctx context.Context, key store.Key, updateFunc func(ctx context.Context, obj T1) T1) {
+	r.m.Lock()
+	defer r.m.Unlock()
+
+	obj := r.db[key]
+	if updateFunc != nil {
+		r.db[key] = updateFunc(ctx, obj)
+	}
+}
+
 func (r *mem[T1]) update(ctx context.Context, key store.Key, newd T1) {
 	r.m.Lock()
 	defer r.m.Unlock()

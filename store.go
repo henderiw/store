@@ -37,6 +37,9 @@ type Storer[T1 any] interface {
 	// Update data with the given key in the storage
 	Update(ctx context.Context, key Key, data T1) error
 
+	// Update data in a concurrent way through a function
+	UpdateWithKeyFn(ctx context.Context, key Key, updateFunc func(ctx context.Context, obj T1) T1)
+
 	// Delete deletes data and key from the storage
 	Delete(ctx context.Context, key Key) error
 
