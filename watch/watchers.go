@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"sync"
 
-	"sigs.k8s.io/controller-runtime/pkg/log"
+	"github.com/henderiw/logger/log"
 )
 
 func NewWatchers[T1 any](maxWatchers int) *Watchers[T1] {
@@ -82,9 +82,9 @@ func (r *Watchers[T1]) NotifyWatchers(ctx context.Context, ev Event[T1]) {
 	r.m.RLock()
 	defer r.m.RUnlock()
 	log := log.FromContext(ctx)
-	log.Info("notify watchers", "eventType", ev.Type.String())
+	log.Debug("notify watchers", "eventType", ev.Type.String())
 	for id, w := range r.watchers {
-		log.Info("notify watcher", "eventType", ev.Type.String(), "id", id)
+		log.Debug("notify watcher", "eventType", ev.Type.String(), "id", id)
 		w.ResultCh <- ev
 	}
 }

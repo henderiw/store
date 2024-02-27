@@ -166,7 +166,7 @@ func (r *mem[T1]) Watch(ctx context.Context) (watch.Interface[T1], error) {
 	//defer r.m.Unlock()
 
 	log := log.FromContext(ctx)
-	log.Info("watch memory store")
+	log.Debug("watch memory store")
 	if r.watchers.IsExhausted() {
 		return nil, fmt.Errorf("cannot allocate watcher, out of resources")
 	}
@@ -177,7 +177,7 @@ func (r *mem[T1]) Watch(ctx context.Context) (watch.Interface[T1], error) {
 	r.List(ctx, func(ctx context.Context, key store.Key, obj T1) {
 		items[key] = obj
 	})
-	log.Info("watch list items", "len", len(items))
+	log.Debug("watch list items", "len", len(items))
 	for _, obj := range items {
 		w.ResultCh <- watch.Event[T1]{
 			Type:   watch.Added,
@@ -186,11 +186,11 @@ func (r *mem[T1]) Watch(ctx context.Context) (watch.Interface[T1], error) {
 	}
 	// this ensures the initial events from the list
 	// get processed first
-	log.Info("watcher add")
+	log.Debug("watcher add")
 	if err := r.watchers.Add(w); err != nil {
-		log.Info("cannot add watcher", "error", err.Error())
+		log.Debug("cannot add watcher", "error", err.Error())
 		return nil, err
 	}
-	log.Info("watcher added")
+	log.Debug("watcher added")
 	return w, nil
 }
