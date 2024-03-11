@@ -36,7 +36,7 @@ func (r *file[T1]) filename(key store.Key) string {
 	return filepath.Join(r.objRootPath, key.Name+".json")
 }
 
-func (r *file[T1]) readFile(ctx context.Context, key store.Key) (T1, error) {
+func (r *file[T1]) readFile(_ context.Context, key store.Key) (T1, error) {
 	var obj T1
 	content, err := os.ReadFile(filepath.Clean(r.filename(key)))
 	if err != nil {
@@ -81,7 +81,7 @@ func (r *file[T1]) writeFile(ctx context.Context, key store.Key, obj T1) error {
 	return os.WriteFile(r.filename(key), buf.Bytes(), 0644)
 }
 
-func (r *file[T1]) deleteFile(ctx context.Context, key store.Key) error {
+func (r *file[T1]) deleteFile(_ context.Context, key store.Key) error {
 	return os.Remove(r.filename(key))
 }
 
