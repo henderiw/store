@@ -29,6 +29,10 @@ type Storer[T1 any] interface {
 	// Retrieve retrieves data for the given key from the storage
 	List(ctx context.Context, visitorFunc func(context.Context, Key, T1))
 
+	// Retrieve retrieves data for the given key from the storage
+	ListKeys(ctx context.Context) []string
+
+	// Len returns the # entries in the store
 	Len(ctx context.Context) int
 
 	// Create data with the given key in the storage

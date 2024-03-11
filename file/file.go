@@ -71,6 +71,14 @@ func (r *file[T1]) List(ctx context.Context, visitorFunc func(ctx context.Contex
 	}
 }
 
+func (r *file[T1]) ListKeys(ctx context.Context) []string {
+	keys := []string{}
+	r.List(ctx, func(ctx context.Context, key store.Key, _ T1) {
+		keys = append(keys, key.Name)
+	})
+	return keys
+}
+
 func (r *file[T1]) Len(ctx context.Context) int {
 	log := log.FromContext(ctx)
 	items := 0

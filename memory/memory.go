@@ -67,6 +67,17 @@ func (r *mem[T1]) List(ctx context.Context, visitorFunc func(ctx context.Context
 	}
 }
 
+func (r *mem[T1]) ListKeys(ctx context.Context) []string {
+	r.m.RLock()
+	defer r.m.RUnlock()
+
+	keys := []string{}
+	r.List(ctx, func(ctx context.Context, key store.Key, _ T1) {
+		keys = append(keys, key.Name)
+	})
+	return keys
+}
+
 func (r *mem[T1]) Len(ctx context.Context) int {
 	r.m.RLock()
 	defer r.m.RUnlock()
@@ -128,13 +139,13 @@ func (r *mem[T1]) UpdateWithKeyFn(ctx context.Context, key store.Key, updateFunc
 	}
 }
 
-func (r *mem[T1]) update(ctx context.Context, key store.Key, newd T1) {
+func (r *mem[T1]) update(_ context.Context, key store.Key, newd T1) {
 	r.m.Lock()
 	defer r.m.Unlock()
 	r.db[key] = newd
 }
 
-func (r *mem[T1]) delete(ctx context.Context, key store.Key) {
+func (r *mem[T1]) delete(_ context.Context, key store.Key) {
 	r.m.Lock()
 	defer r.m.Unlock()
 	delete(r.db, key)
