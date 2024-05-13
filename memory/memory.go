@@ -68,9 +68,6 @@ func (r *mem[T1]) List(ctx context.Context, visitorFunc func(ctx context.Context
 }
 
 func (r *mem[T1]) ListKeys(ctx context.Context) []string {
-	r.m.RLock()
-	defer r.m.RUnlock()
-
 	keys := []string{}
 	r.List(ctx, func(ctx context.Context, key store.Key, _ T1) {
 		keys = append(keys, key.Name)
