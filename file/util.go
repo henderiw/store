@@ -25,6 +25,7 @@ import (
 
 	"github.com/henderiw/logger/log"
 	"github.com/henderiw/store"
+	"github.com/henderiw/store/util.go"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -75,7 +76,7 @@ func (r *file[T1]) writeFile(ctx context.Context, key store.Key, obj T1) error {
 		return err
 	}
 	log.Info("write file", "fileName", r.filename(key), "data", buf.String())
-	if err := ensureDir(filepath.Dir(r.filename(key))); err != nil {
+	if err := util.EnsureDir(filepath.Dir(r.filename(key))); err != nil {
 		return err
 	}
 	return os.WriteFile(r.filename(key), buf.Bytes(), 0644)
@@ -120,16 +121,4 @@ func (r *file[T1]) visitDir(ctx context.Context, visitorFunc func(ctx context.Co
 
 		return nil
 	})
-}
-
-func exists(filepath string) bool {
-	_, err := os.Stat(filepath)
-	return err == nil
-}
-
-func ensureDir(dirname string) error {
-	if !exists(dirname) {
-		return os.MkdirAll(dirname, 0755)
-	}
-	return nil
 }
