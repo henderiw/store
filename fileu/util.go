@@ -30,9 +30,9 @@ import (
 
 func (r *file) filename(key store.Key) string {
 	if key.Namespace != "" {
-		return fmt.Sprintf("%s_%s_%s_%s.yaml", r.objRootPath, r.grPrefix, key.Namespace, key.Name)
+		return fmt.Sprintf("%s/%s_%s_%s.yaml", r.objRootPath, r.grPrefix, key.Namespace, key.Name)
 	}
-	return fmt.Sprintf("%s_%s_%s.yaml", r.objRootPath, r.grPrefix, key.Name)
+	return fmt.Sprintf("%s/%s_%s.yaml", r.objRootPath, r.grPrefix, key.Name)
 }
 
 func (r *file) readFile(_ context.Context, key store.Key) (runtime.Unstructured, error) {
