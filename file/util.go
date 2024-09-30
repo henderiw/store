@@ -16,30 +16,28 @@ package file
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 
-	"github.com/henderiw/logger/log"
 	"github.com/henderiw/store"
 	"github.com/henderiw/store/util.go"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func (r *file[T1]) filename(key store.Key) string {
+func (r *file) filename(key store.Key) string {
 	if key.Namespace != "" {
 		return filepath.Join(r.objRootPath, key.Namespace, key.Name+".json")
 	}
 	return filepath.Join(r.objRootPath, key.Name+".json")
 }
 
-func (r *file[T1]) readFile(_ context.Context, key store.Key) (T1, error) {
-	var obj T1
-	content, err := os.ReadFile(filepath.Clean(r.filename(key)))
+func (r *file) readFile(key store.Key) (runtime.Object, error) {
+	var obj runtime.Object
+	content, err := os.ReadFile(r.filename(key))
 	if err != nil {
 		return obj, err
 	}
@@ -48,11 +46,7 @@ func (r *file[T1]) readFile(_ context.Context, key store.Key) (T1, error) {
 	if err != nil {
 		return obj, err
 	}
-	obj, ok := decodeObj.(T1)
-	if !ok {
-		return obj, fmt.Errorf("unexpected object, got: %s", reflect.TypeOf(decodeObj).Name())
-	}
-	return obj, nil
+	return decodeObj, nil
 }
 
 func convert(obj any) (runtime.Object, error) {
@@ -63,30 +57,31 @@ func convert(obj any) (runtime.Object, error) {
 	return runtimeObj, nil
 }
 
-func (r *file[T1]) writeFile(ctx context.Context, key store.Key, obj T1) error {
-	log := log.FromContext(ctx)
+func (r *file) exists(key store.Key) bool {
+	_, err := os.Stat(r.filename(key))
+	return err == nil
+}
 
+func (r *file) writeFile(key store.Key, obj runtime.Object) error {
 	runtimeObj, err := convert(obj)
 	if err != nil {
 		return err
 	}
-
 	buf := new(bytes.Buffer)
 	if err := r.codec.Encode(runtimeObj, buf); err != nil {
 		return err
 	}
-	log.Info("write file", "fileName", r.filename(key), "data", buf.String())
 	if err := util.EnsureDir(filepath.Dir(r.filename(key))); err != nil {
 		return err
 	}
 	return os.WriteFile(r.filename(key), buf.Bytes(), 0644)
 }
 
-func (r *file[T1]) deleteFile(_ context.Context, key store.Key) error {
+func (r *file) deleteFile(key store.Key) error {
 	return os.Remove(r.filename(key))
 }
 
-func (r *file[T1]) visitDir(ctx context.Context, visitorFunc func(ctx context.Context, key store.Key, obj T1)) error {
+func (r *file) visitDir(visitorFunc func(store.Key, runtime.Object), _ ...store.ListOption) error {
 	return filepath.Walk(r.objRootPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -111,12 +106,12 @@ func (r *file[T1]) visitDir(ctx context.Context, visitorFunc func(ctx context.Co
 			Namespace: namespace,
 		})
 
-		newObj, err := r.readFile(ctx, key)
+		newObj, err := r.readFile(key)
 		if err != nil {
 			return err
 		}
 		if visitorFunc != nil {
-			visitorFunc(ctx, key, newObj)
+			visitorFunc(key, newObj)
 		}
 
 		return nil

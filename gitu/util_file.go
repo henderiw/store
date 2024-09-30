@@ -12,28 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package fileu
+package gitu
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/henderiw/store"
+	"github.com/henderiw/store/util.go"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/yaml"
 )
 
-func (r *file) filename(key store.Key) string {
+func (r *gitrepo) filename(key store.Key) string {
 	if key.Namespace != "" {
-		return filepath.Join(r.objRootPath, key.Namespace, key.Name+".yaml")
+		return filepath.Join(r.rootPath, key.Namespace, key.Name+".yaml")
 	}
-	return filepath.Join(r.objRootPath, key.Name+".yaml")
+	return filepath.Join(r.rootPath, key.Name+".yaml")
 }
 
-func (r *file) readFile(key store.Key) (runtime.Unstructured, error) {
+func (r *gitrepo) readFile(key store.Key) (runtime.Unstructured, error) {
+	// this is adding the storage to the worktree
+	if err := util.EnsureDir(r.rootPath); err != nil {
+		return nil, fmt.Errorf("unable to write data dir: %s", err)
+	}
 	var obj runtime.Unstructured
 	content, err := os.ReadFile(r.filename(key))
 	if err != nil {
@@ -48,12 +54,15 @@ func (r *file) readFile(key store.Key) (runtime.Unstructured, error) {
 	}, nil
 }
 
-func (r *file) exists(key store.Key) bool {
+func (r *gitrepo) exists(key store.Key) bool {
 	_, err := os.Stat(r.filename(key))
 	return err == nil
 }
 
-func (r *file) writeFile(key store.Key, obj runtime.Unstructured) error {
+func (r *gitrepo) writeFile(key store.Key, obj runtime.Unstructured) error {
+	if err := util.EnsureDir(r.rootPath); err != nil {
+		return fmt.Errorf("unable to write data dir: %s", err)
+	}
 	b, err := yaml.Marshal(obj)
 	if err != nil {
 		return err
@@ -61,33 +70,34 @@ func (r *file) writeFile(key store.Key, obj runtime.Unstructured) error {
 	return os.WriteFile(r.filename(key), b, 0644)
 }
 
-func (r *file) deleteFile(key store.Key) error {
+func (r *gitrepo) deleteFile(key store.Key) error {
 	return os.Remove(r.filename(key))
 }
 
-func (r *file) visitDir(visitorFunc func(store.Key, runtime.Unstructured), _ ...store.ListOption) error {
-	return filepath.Walk(r.objRootPath, func(path string, info os.FileInfo, err error) error {
+func (r *gitrepo) visitDir(visitorFunc func(store.Key, runtime.Unstructured)) error {
+	if err := util.EnsureDir(r.rootPath); err != nil {
+		return fmt.Errorf("unable to write data dir: %s", err)
+	}
+	return filepath.Walk(r.rootPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if info.IsDir() {
 			return nil
 		}
-		// skip any non json file
+		// skip any non yaml file
 		if !strings.HasSuffix(info.Name(), ".yaml") {
 			return nil
 		}
-		// skip if the group resource prefix does not match
-		//if !strings.HasPrefix(info.Name(), r.grPrefix) {
-		//	return nil
-		//}
 		// this is a yaml file by now
 		// next step is find the key (namespace and name)
-		name := strings.TrimSuffix(filepath.Base(path), ".yaml")
+		name := filepath.Base(path)
+		name = strings.TrimSuffix(name, ".yaml")
 		namespace := ""
-		pathSplit := strings.Split(path, "/")
-		if len(pathSplit) > (len(strings.Split(r.objRootPath, "/")) + 1) {
-			namespace = pathSplit[len(pathSplit)-2]
+		parts := strings.Split(name, "_")
+		if len(parts) > 1 {
+			namespace = parts[0]
+			name = parts[1]
 		}
 		key := store.KeyFromNSN(types.NamespacedName{
 			Name:      name,

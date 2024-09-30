@@ -20,9 +20,11 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/henderiw/logger/log"
 	"github.com/henderiw/store"
 	"github.com/henderiw/store/watch"
-	"github.com/henderiw/logger/log"
+	"github.com/henderiw/store/watcher"
+	"github.com/henderiw/store/watchermanager"
 	//metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 )
 
@@ -31,21 +33,38 @@ const (
 	NotFound = "not found"
 )
 
-func NewStore[T1 any]() store.Storer[T1] {
+func NewStore[T1 any](new func() T1) store.Storer[T1] {
 	return &mem[T1]{
-		db:       map[store.Key]T1{},
-		watchers: watch.NewWatchers[T1](32),
+		db:             map[store.Key]T1{},
+		watchermanager: watchermanager.New[T1](64),
+		new:            new,
 	}
 }
 
 type mem[T1 any] struct {
-	m        sync.RWMutex
-	db       map[store.Key]T1
-	watchers *watch.Watchers[T1]
+	m              sync.RWMutex
+	db             map[store.Key]T1
+	watchermanager watchermanager.WatcherManager[T1]
+	new            func() T1
+	watching       bool
+}
+
+func (r *mem[T1]) Start(ctx context.Context) {
+	r.m.Lock()
+	defer r.m.Unlock()
+	r.watching = true
+	go r.watchermanager.Start(ctx)
+}
+
+func (r *mem[T1]) Stop() {
+	r.m.Lock()
+	defer r.m.Unlock()
+	r.watching = false
+	r.watchermanager.Stop()
 }
 
 // Get return the type
-func (r *mem[T1]) Get(ctx context.Context, key store.Key) (T1, error) {
+func (r *mem[T1]) Get(key store.Key, opts ...store.GetOption) (T1, error) {
 	r.m.RLock()
 	defer r.m.RUnlock()
 
@@ -56,42 +75,63 @@ func (r *mem[T1]) Get(ctx context.Context, key store.Key) (T1, error) {
 	return x, nil
 }
 
-func (r *mem[T1]) List(ctx context.Context, visitorFunc func(ctx context.Context, key store.Key, obj T1)) {
+func (r *mem[T1]) List(visitorFunc func(key store.Key, obj T1), _ ...store.ListOption) {
 	r.m.RLock()
 	defer r.m.RUnlock()
 
 	for key, obj := range r.db {
 		if visitorFunc != nil {
-			visitorFunc(ctx, key, obj)
+			visitorFunc(key, obj)
 		}
 	}
 }
 
-func (r *mem[T1]) ListKeys(ctx context.Context) []string {
+func (r *mem[T1]) ListKeys(opts ...store.ListOption) []string {
 	keys := []string{}
-	r.List(ctx, func(ctx context.Context, key store.Key, _ T1) {
+	r.List(func(key store.Key, _ T1) {
 		keys = append(keys, key.Name)
-	})
+	}, opts...)
 	return keys
 }
 
-func (r *mem[T1]) Len(ctx context.Context) int {
+func (r *mem[T1]) Len(_ ...store.ListOption) int {
 	r.m.RLock()
 	defer r.m.RUnlock()
 
 	return len(r.db)
 }
 
-func (r *mem[T1]) Create(ctx context.Context, key store.Key, data T1) error {
+func (r *mem[T1]) Apply(key store.Key, data T1, opts ...store.ApplyOption) error {
+	//_, exists := r.db[key]
+	exists := true
+	if _, err := r.Get(key); err != nil {
+		exists = false
+	}
+	r.update(key, data)
+	if !exists {
+		r.notifyWatcher(watch.WatchEvent[T1]{
+			Type:   watch.Added,
+			Object: data,
+		})
+	} else {
+		r.notifyWatcher(watch.WatchEvent[T1]{
+			Type:   watch.Modified,
+			Object: data,
+		})
+	}
+	return nil
+}
+
+func (r *mem[T1]) Create(key store.Key, data T1, opts ...store.CreateOption) error {
 	// if an error is returned the entry already exists
-	if _, err := r.Get(ctx, key); err == nil {
+	if _, err := r.Get(key); err == nil {
 		return fmt.Errorf("duplicate entry %v", key.String())
 	}
 	// update the cache before calling the callback since the cb fn will use this data
-	r.update(ctx, key, data)
+	r.update(key, data)
 
 	// notify watchers
-	r.watchers.NotifyWatchers(ctx, watch.Event[T1]{
+	r.notifyWatcher(watch.WatchEvent[T1]{
 		Type:   watch.Added,
 		Object: data,
 	})
@@ -99,26 +139,26 @@ func (r *mem[T1]) Create(ctx context.Context, key store.Key, data T1) error {
 }
 
 // Upsert creates or updates the entry in the cache
-func (r *mem[T1]) Update(ctx context.Context, key store.Key, data T1) error {
+func (r *mem[T1]) Update(key store.Key, data T1, opts ...store.UpdateOption) error {
 	exists := true
-	oldd, err := r.Get(ctx, key)
+	oldd, err := r.Get(key)
 	if err != nil {
 		exists = false
 	}
 
 	// update the cache before calling the callback since the cb fn will use this data
-	r.update(ctx, key, data)
+	r.update(key, data)
 
 	// // notify watchers based on the fact the data got modified or not
 	if exists {
 		if !reflect.DeepEqual(oldd, data) {
-			r.watchers.NotifyWatchers(ctx, watch.Event[T1]{
+			r.notifyWatcher(watch.WatchEvent[T1]{
 				Type:   watch.Modified,
 				Object: data,
 			})
 		}
 	} else {
-		r.watchers.NotifyWatchers(ctx, watch.Event[T1]{
+		r.notifyWatcher(watch.WatchEvent[T1]{
 			Type:   watch.Added,
 			Object: data,
 		})
@@ -126,79 +166,69 @@ func (r *mem[T1]) Update(ctx context.Context, key store.Key, data T1) error {
 	return nil
 }
 
-func (r *mem[T1]) UpdateWithKeyFn(ctx context.Context, key store.Key, updateFunc func(ctx context.Context, obj T1) T1) {
+func (r *mem[T1]) UpdateWithKeyFn(key store.Key, updateFunc func(obj T1) T1) {
 	r.m.Lock()
 	defer r.m.Unlock()
 
 	obj := r.db[key]
 	if updateFunc != nil {
-		r.db[key] = updateFunc(ctx, obj)
+		r.db[key] = updateFunc(obj)
 	}
 }
 
-func (r *mem[T1]) update(_ context.Context, key store.Key, newd T1) {
+func (r *mem[T1]) update(key store.Key, newd T1) {
 	r.m.Lock()
 	defer r.m.Unlock()
 	r.db[key] = newd
 }
 
-func (r *mem[T1]) delete(_ context.Context, key store.Key) {
+func (r *mem[T1]) delete(key store.Key) {
 	r.m.Lock()
 	defer r.m.Unlock()
 	delete(r.db, key)
 }
 
 // Delete deletes the entry in the cache
-func (r *mem[T1]) Delete(ctx context.Context, key store.Key) error {
+func (r *mem[T1]) Delete(key store.Key, _ ...store.DeleteOption) error {
 	// only if an exisitng object gets deleted we
 	// call the registered callbacks
-	exists := true
-	obj, err := r.Get(ctx, key)
+	obj, err := r.Get(key)
 	if err != nil {
 		return nil
 	}
-	// if exists call the callback
-	if exists {
-		r.watchers.NotifyWatchers(ctx, watch.Event[T1]{
-			Type:   watch.Deleted,
-			Object: obj,
-		})
-	}
 	// delete the entry to ensure the cb uses the proper data
-	r.delete(ctx, key)
+	r.delete(key)
+	// if exists call the callback
+	r.notifyWatcher(watch.WatchEvent[T1]{
+		Type:   watch.Deleted,
+		Object: obj,
+	})
+
 	return nil
 }
 
-func (r *mem[T1]) Watch(ctx context.Context) (watch.Interface[T1], error) {
-	//r.m.Lock()
-	//defer r.m.Unlock()
+func (r *mem[T1]) notifyWatcher(event watch.WatchEvent[T1]) {
+	r.m.RLock()
+	defer r.m.RUnlock()
+	if r.watching {
+		r.watchermanager.WatchChan() <- event
+	}
+}
+
+func (r *mem[T1]) Watch(ctx context.Context, opts ...store.ListOption) (watch.WatchInterface[T1], error) {
+	ctx, cancel := context.WithCancel(ctx)
 
 	log := log.FromContext(ctx)
-	log.Debug("watch memory store")
-	if r.watchers.IsExhausted() {
-		return nil, fmt.Errorf("cannot allocate watcher, out of resources")
-	}
-	w := r.watchers.GetWatchContext()
+	log.Debug("watch")
 
-	// On initial watch, send all the existing objects
-	items := map[store.Key]T1{}
-	r.List(ctx, func(ctx context.Context, key store.Key, obj T1) {
-		items[key] = obj
-	})
-	log.Debug("watch list items", "len", len(items))
-	for _, obj := range items {
-		w.ResultCh <- watch.Event[T1]{
-			Type:   watch.Added,
-			Object: obj,
-		}
+	w := &watcher.Watcher[T1]{
+		Cancel:         cancel,
+		ResultChannel:  make(chan watch.WatchEvent[T1]),
+		WatcherManager: r.watchermanager,
+		New:            r.new,
 	}
-	// this ensures the initial events from the list
-	// get processed first
-	log.Debug("watcher add")
-	if err := r.watchers.Add(w); err != nil {
-		log.Debug("cannot add watcher", "error", err.Error())
-		return nil, err
-	}
-	log.Debug("watcher added")
+
+	go w.ListAndWatch(ctx, r, opts...)
+
 	return w, nil
 }

@@ -19,11 +19,14 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"sync"
 
 	"github.com/henderiw/logger/log"
 	"github.com/henderiw/store"
 	"github.com/henderiw/store/util.go"
 	"github.com/henderiw/store/watch"
+	"github.com/henderiw/store/watcher"
+	"github.com/henderiw/store/watchermanager"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -40,69 +43,101 @@ type Config struct {
 	NewFunc       func() runtime.Object
 }
 
-func NewStore[T1 any](cfg *Config) (store.Storer[T1], error) {
+func NewStore(cfg *Config) (store.Storer[runtime.Object], error) {
 	objRootPath := filepath.Join(cfg.RootPath, cfg.GroupResource.Group, cfg.GroupResource.Resource)
 	if err := util.EnsureDir(objRootPath); err != nil {
 		return nil, fmt.Errorf("unable to write data dir: %s", err)
 	}
-	return &file[T1]{
-		objRootPath: objRootPath,
-		codec:       cfg.Codec,
-		newFunc:     cfg.NewFunc,
-		watchers:    watch.NewWatchers[T1](32),
+	return &file{
+		objRootPath:    objRootPath,
+		codec:          cfg.Codec,
+		newFunc:        cfg.NewFunc,
+		watchermanager: watchermanager.New[runtime.Object](64),
 	}, nil
 }
 
-type file[T1 any] struct {
-	objRootPath string
-	codec       runtime.Codec
-	newFunc     func() runtime.Object
-	watchers    *watch.Watchers[T1]
+type file struct {
+	objRootPath    string
+	codec          runtime.Codec
+	newFunc        func() runtime.Object
+	watchermanager watchermanager.WatcherManager[runtime.Object]
+	m              sync.RWMutex
+	watching       bool
+}
+
+func (r *file) Start(ctx context.Context) {
+	r.m.Lock()
+	defer r.m.Unlock()
+	r.watching = true
+	go r.watchermanager.Start(ctx)
+}
+
+func (r *file) Stop() {
+	r.m.Lock()
+	defer r.m.Unlock()
+	r.watching = false
+	r.watchermanager.Stop()
 }
 
 // Get return the type
-func (r *file[T1]) Get(ctx context.Context, key store.Key) (T1, error) {
-	return r.readFile(ctx, key)
+func (r *file) Get(key store.Key, opts ...store.GetOption) (runtime.Object, error) {
+	return r.readFile(key)
 }
 
-func (r *file[T1]) List(ctx context.Context, visitorFunc func(ctx context.Context, key store.Key, obj T1)) {
-	log := log.FromContext(ctx)
-	if err := r.visitDir(ctx, visitorFunc); err != nil {
+func (r *file) List(visitorFunc func(key store.Key, obj runtime.Object), opts ...store.ListOption) {
+	log := log.FromContext(context.Background())
+	if err := r.visitDir(visitorFunc, opts...); err != nil {
 		log.Error("cannot list visiting dir failed", "error", err.Error())
 	}
 }
 
-func (r *file[T1]) ListKeys(ctx context.Context) []string {
+func (r *file) ListKeys(opts ...store.ListOption) []string {
 	keys := []string{}
-	r.List(ctx, func(ctx context.Context, key store.Key, _ T1) {
+	r.List(func(key store.Key, _ runtime.Object) {
 		keys = append(keys, key.Name)
-	})
+	}, opts...)
 	return keys
 }
 
-func (r *file[T1]) Len(ctx context.Context) int {
-	log := log.FromContext(ctx)
+func (r *file) Len(opts ...store.ListOption) int {
 	items := 0
-	if err := r.visitDir(ctx, func(ctx context.Context, key store.Key, obj T1) {
+	r.List(func(key store.Key, _ runtime.Object) {
 		items++
-	}); err != nil {
-		log.Error("cannot list visiting dir failed", "error", err.Error())
-	}
+	}, opts...)
 	return items
 }
 
-func (r *file[T1]) Create(ctx context.Context, key store.Key, data T1) error {
+func (r *file) Apply(key store.Key, data runtime.Object, opts ...store.ApplyOption) error {
+	exists := r.exists(key)
+	if err := r.update(key, data); err != nil {
+		return err
+	}
+	if !exists {
+		r.notifyWatcher(watch.WatchEvent[runtime.Object]{
+			Type:   watch.Added,
+			Object: data,
+		})
+	} else {
+		r.notifyWatcher(watch.WatchEvent[runtime.Object]{
+			Type:   watch.Modified,
+			Object: data,
+		})
+	}
+	return nil
+}
+
+func (r *file) Create(key store.Key, data runtime.Object, opts ...store.CreateOption) error {
 	// if an error is returned the entry already exists
-	if _, err := r.Get(ctx, key); err == nil {
+	if _, err := r.Get(key); err == nil {
 		return fmt.Errorf("duplicate entry %v", key.String())
 	}
 	// update the store before calling the callback since the cb fn will use this data
-	if err := r.update(ctx, key, data); err != nil {
+	if err := r.update(key, data); err != nil {
 		return err
 	}
 
 	// notify watchers
-	r.watchers.NotifyWatchers(ctx, watch.Event[T1]{
+	r.notifyWatcher(watch.WatchEvent[runtime.Object]{
 		Type:   watch.Added,
 		Object: data,
 	})
@@ -110,28 +145,28 @@ func (r *file[T1]) Create(ctx context.Context, key store.Key, data T1) error {
 }
 
 // Upsert creates or updates the entry in the cache
-func (r *file[T1]) Update(ctx context.Context, key store.Key, data T1) error {
+func (r *file) Update(key store.Key, data runtime.Object, opts ...store.UpdateOption) error {
 	exists := true
-	oldd, err := r.Get(ctx, key)
+	oldd, err := r.Get(key)
 	if err != nil {
 		exists = false
 	}
 
 	// update the cache before calling the callback since the cb fn will use this data
-	if err := r.update(ctx, key, data); err != nil {
+	if err := r.update(key, data); err != nil {
 		return err
 	}
 
 	// // notify watchers based on the fact the data got modified or not
 	if exists {
 		if !reflect.DeepEqual(oldd, data) {
-			r.watchers.NotifyWatchers(ctx, watch.Event[T1]{
+			r.notifyWatcher(watch.WatchEvent[runtime.Object]{
 				Type:   watch.Modified,
 				Object: data,
 			})
 		}
 	} else {
-		r.watchers.NotifyWatchers(ctx, watch.Event[T1]{
+		r.notifyWatcher(watch.WatchEvent[runtime.Object]{
 			Type:   watch.Added,
 			Object: data,
 		})
@@ -139,70 +174,64 @@ func (r *file[T1]) Update(ctx context.Context, key store.Key, data T1) error {
 	return nil
 }
 
-func (r *file[T1]) UpdateWithKeyFn(ctx context.Context, key store.Key, updateFunc func(ctx context.Context, obj T1) T1) {
-	obj, _ := r.readFile(ctx, key)
+func (r *file) UpdateWithKeyFn(key store.Key, updateFunc func(obj runtime.Object) runtime.Object) {
+	obj, _ := r.readFile(key)
 	if updateFunc != nil {
-		obj = updateFunc(ctx, obj)
-		r.update(ctx, key, obj)
+		obj = updateFunc(obj)
+		r.update(key, obj)
 	}
 }
 
-func (r *file[T1]) update(ctx context.Context, key store.Key, newd T1) error {
-	return r.writeFile(ctx, key, newd)
+func (r *file) update(key store.Key, newd runtime.Object) error {
+	return r.writeFile(key, newd)
 }
 
-func (r *file[T1]) delete(ctx context.Context, key store.Key) error {
-	return r.deleteFile(ctx, key)
+func (r *file) delete(key store.Key) error {
+	return r.deleteFile(key)
 }
 
 // Delete deletes the entry in the cache
-func (r *file[T1]) Delete(ctx context.Context, key store.Key) error {
+func (r *file) Delete(key store.Key, opts ...store.DeleteOption) error {
 	// only if an exisitng object gets deleted we
 	// call the registered callbacks
 	exists := true
-	obj, err := r.Get(ctx, key)
+	obj, err := r.Get(key)
 	if err != nil {
 		return nil
 	}
 	// if exists call the callback
 	if exists {
-		r.watchers.NotifyWatchers(ctx, watch.Event[T1]{
+		r.notifyWatcher(watch.WatchEvent[runtime.Object]{
 			Type:   watch.Deleted,
 			Object: obj,
 		})
 	}
 	// delete the entry to ensure the cb uses the proper data
-	return r.delete(ctx, key)
+	return r.delete(key)
 }
 
-func (r *file[T1]) Watch(ctx context.Context) (watch.Interface[T1], error) {
-	// lock is not required here
-	log := log.FromContext(ctx)
-	log.Info("watch file store")
-	if r.watchers.IsExhausted() {
-		return nil, fmt.Errorf("cannot allocate watcher, out of resources")
+func (r *file) notifyWatcher(event watch.WatchEvent[runtime.Object]) {
+	r.m.RLock()
+	defer r.m.RUnlock()
+	if r.watching {
+		r.watchermanager.WatchChan() <- event
 	}
-	w := r.watchers.GetWatchContext()
+}
 
-	// On initial watch, send all the existing objects
-	items := map[store.Key]T1{}
-	r.List(ctx, func(ctx context.Context, key store.Key, obj T1) {
-		items[key] = obj
-	})
-	log.Info("watch list items", "len", len(items))
-	for _, obj := range items {
-		w.ResultCh <- watch.Event[T1]{
-			Type:   watch.Added,
-			Object: obj,
-		}
+func (r *file) Watch(ctx context.Context, opts ...store.ListOption) (watch.WatchInterface[runtime.Object], error) {
+	ctx, cancel := context.WithCancel(ctx)
+
+	log := log.FromContext(ctx)
+	log.Debug("watch")
+
+	w := &watcher.Watcher[runtime.Object]{
+		Cancel:         cancel,
+		ResultChannel:  make(chan watch.WatchEvent[runtime.Object]),
+		WatcherManager: r.watchermanager,
+		New:            r.newFunc,
 	}
-	// this ensures the initial events from the list
-	// get processed first
-	log.Info("watcher add")
-	if err := r.watchers.Add(w); err != nil {
-		log.Info("cannot add watcher", "error", err.Error())
-		return nil, err
-	}
-	log.Info("watcher added")
+
+	go w.ListAndWatch(ctx, r, opts...)
+
 	return w, nil
 }

@@ -14,9 +14,8 @@
 
 package watch
 
-
 // Interface can be implemented by anything that knows how to watch and report changes.
-type Interface[T1 any] interface {
+type WatchInterface[T1 any] interface {
 	// Stop stops watching. Will close the channel returned by ResultChan(). Releases
 	// any resources used by the watch.
 	Stop()
@@ -24,7 +23,28 @@ type Interface[T1 any] interface {
 	// ResultChan returns a chan which will receive all the events. If an error occurs
 	// or Stop() is called, the implementation will close this channel and
 	// release any resources used by the watch.
-	ResultChan() <-chan Event[T1]
+	ResultChan() <-chan WatchEvent[T1]
+}
+
+var (
+	DefaultChanSize int32 = 100
+)
+
+// Event represents a single event to a watched resource.
+// +k8s:deepcopy-gen=true
+type WatchEvent[T1 any] struct {
+	Type EventType
+
+	// Object is:
+	//  * If Type is Added or Modified: the new state of the object.
+	//  * If Type is Deleted: the state of the object immediately before deletion.
+	//  * If Type is Bookmark: the object (instance of a type being watched) where
+	//    only ResourceVersion field is set. On successful restart of watch from a
+	//    bookmark resourceVersion, client is guaranteed to not get repeat event
+	//    nor miss any events.
+	//  * If Type is Error: *api.Status is recommended; other types may make sense
+	//    depending on context.
+	Object T1
 }
 
 type EventType int
@@ -33,15 +53,10 @@ const (
 	Added EventType = iota
 	Modified
 	Deleted
+	Bookmark
+	Error
 )
 
 func (r EventType) String() string {
 	return [...]string{"Added", "Modified", "Deleted"}[r]
-}
-
-// CreateEvent is an event where a object was created.
-type Event[T1 any] struct {
-	Type EventType
-	// Object is the object from the event
-	Object T1
 }

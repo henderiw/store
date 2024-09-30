@@ -23,6 +23,9 @@ import (
 	"github.com/henderiw/logger/log"
 	"github.com/henderiw/store"
 	"github.com/henderiw/store/watch"
+	"github.com/henderiw/store/watcher"
+	"github.com/henderiw/store/watchermanager"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -33,19 +36,34 @@ const (
 
 func NewStore() store.UnstructuredStore {
 	return &mem{
-		db:       map[store.Key]runtime.Unstructured{},
-		watchers: watch.NewWatchers[runtime.Unstructured](64),
+		db:             map[store.Key]runtime.Unstructured{},
+		watchermanager: watchermanager.New[runtime.Unstructured](64),
 	}
 }
 
 type mem struct {
-	m        sync.RWMutex
-	db       map[store.Key]runtime.Unstructured
-	watchers *watch.Watchers[runtime.Unstructured]
+	m              sync.RWMutex
+	db             map[store.Key]runtime.Unstructured
+	watchermanager watchermanager.WatcherManager[runtime.Unstructured]
+	watching       bool
+}
+
+func (r *mem) Start(ctx context.Context) {
+	r.m.Lock()
+	defer r.m.Unlock()
+	r.watching = true
+	go r.watchermanager.Start(ctx)
+}
+
+func (r *mem) Stop() {
+	r.m.Lock()
+	defer r.m.Unlock()
+	r.watching = false
+	r.watchermanager.Stop()
 }
 
 // Get return the type
-func (r *mem) Get(ctx context.Context, key store.Key) (runtime.Unstructured, error) {
+func (r *mem) Get(key store.Key, opts ...store.GetOption) (runtime.Unstructured, error) {
 	r.m.RLock()
 	defer r.m.RUnlock()
 
@@ -56,42 +74,59 @@ func (r *mem) Get(ctx context.Context, key store.Key) (runtime.Unstructured, err
 	return x, nil
 }
 
-func (r *mem) List(ctx context.Context, visitorFunc func(ctx context.Context, key store.Key, obj runtime.Unstructured)) {
+func (r *mem) List(visitorFunc func(store.Key, runtime.Unstructured), opts ...store.ListOption) {
 	r.m.RLock()
 	defer r.m.RUnlock()
 
 	for key, obj := range r.db {
 		if visitorFunc != nil {
-			visitorFunc(ctx, key, obj)
+			visitorFunc(key, obj)
 		}
 	}
 }
 
-func (r *mem) ListKeys(ctx context.Context) []string {
+func (r *mem) ListKeys(opts ...store.ListOption) []string {
 	keys := []string{}
-	r.List(ctx, func(ctx context.Context, key store.Key, _ runtime.Unstructured) {
+	r.List(func(key store.Key, _ runtime.Unstructured) {
 		keys = append(keys, key.Name)
-	})
+	}, opts...)
 	return keys
 }
 
-func (r *mem) Len(ctx context.Context) int {
+func (r *mem) Len(opts ...store.ListOption) int {
 	r.m.RLock()
 	defer r.m.RUnlock()
 
 	return len(r.db)
 }
 
-func (r *mem) Create(ctx context.Context, key store.Key, data runtime.Unstructured) error {
+func (r *mem) Apply(key store.Key, data runtime.Unstructured, opts ...store.ApplyOption) error {
+	_, exists := r.db[key]
+	r.update(key, data)
+	if !exists {
+		r.notifyWatcher(watch.WatchEvent[runtime.Unstructured]{
+			Type:   watch.Added,
+			Object: data,
+		})
+	} else {
+		r.notifyWatcher(watch.WatchEvent[runtime.Unstructured]{
+			Type:   watch.Modified,
+			Object: data,
+		})
+	}
+	return nil
+}
+
+func (r *mem) Create(key store.Key, data runtime.Unstructured, opts ...store.CreateOption) error {
 	// if an error is returned the entry already exists
-	if _, err := r.Get(ctx, key); err == nil {
+	if _, err := r.Get(key); err == nil {
 		return fmt.Errorf("duplicate entry %v", key.String())
 	}
 	// update the cache before calling the callback since the cb fn will use this data
-	r.update(ctx, key, data)
+	r.update(key, data)
 
 	// notify watchers
-	r.watchers.NotifyWatchers(ctx, watch.Event[runtime.Unstructured]{
+	r.notifyWatcher(watch.WatchEvent[runtime.Unstructured]{
 		Type:   watch.Added,
 		Object: data,
 	})
@@ -99,26 +134,26 @@ func (r *mem) Create(ctx context.Context, key store.Key, data runtime.Unstructur
 }
 
 // Upsert creates or updates the entry in the cache
-func (r *mem) Update(ctx context.Context, key store.Key, data runtime.Unstructured) error {
+func (r *mem) Update(key store.Key, data runtime.Unstructured, opts ...store.UpdateOption) error {
 	exists := true
-	oldd, err := r.Get(ctx, key)
+	oldd, err := r.Get(key)
 	if err != nil {
 		exists = false
 	}
 
 	// update the cache before calling the callback since the cb fn will use this data
-	r.update(ctx, key, data)
+	r.update(key, data)
 
 	// // notify watchers based on the fact the data got modified or not
 	if exists {
 		if !reflect.DeepEqual(oldd, data) {
-			r.watchers.NotifyWatchers(ctx, watch.Event[runtime.Unstructured]{
+			r.notifyWatcher(watch.WatchEvent[runtime.Unstructured]{
 				Type:   watch.Modified,
 				Object: data,
 			})
 		}
 	} else {
-		r.watchers.NotifyWatchers(ctx, watch.Event[runtime.Unstructured]{
+		r.notifyWatcher(watch.WatchEvent[runtime.Unstructured]{
 			Type:   watch.Added,
 			Object: data,
 		})
@@ -126,79 +161,72 @@ func (r *mem) Update(ctx context.Context, key store.Key, data runtime.Unstructur
 	return nil
 }
 
-func (r *mem) UpdateWithKeyFn(ctx context.Context, key store.Key, updateFunc func(ctx context.Context, obj runtime.Unstructured) runtime.Unstructured) {
+func (r *mem) UpdateWithKeyFn(key store.Key, updateFunc func(obj runtime.Unstructured, _ ...store.UpdateOption) runtime.Unstructured) {
 	r.m.Lock()
 	defer r.m.Unlock()
 
 	obj := r.db[key]
 	if updateFunc != nil {
-		r.db[key] = updateFunc(ctx, obj)
+		r.db[key] = updateFunc(obj)
 	}
 }
 
-func (r *mem) update(_ context.Context, key store.Key, newd runtime.Unstructured) {
+func (r *mem) update(key store.Key, newd runtime.Unstructured) {
 	r.m.Lock()
 	defer r.m.Unlock()
 	r.db[key] = newd
 }
 
-func (r *mem) delete(_ context.Context, key store.Key) {
+func (r *mem) delete(key store.Key) {
 	r.m.Lock()
 	defer r.m.Unlock()
 	delete(r.db, key)
 }
 
 // Delete deletes the entry in the cache
-func (r *mem) Delete(ctx context.Context, key store.Key) error {
+func (r *mem) Delete(key store.Key, opts ...store.DeleteOption) error {
 	// only if an exisitng object gets deleted we
 	// call the registered callbacks
 	exists := true
-	obj, err := r.Get(ctx, key)
+	obj, err := r.Get(key)
 	if err != nil {
 		return nil
 	}
 	// if exists call the callback
 	if exists {
-		r.watchers.NotifyWatchers(ctx, watch.Event[runtime.Unstructured]{
+		r.notifyWatcher(watch.WatchEvent[runtime.Unstructured]{
 			Type:   watch.Deleted,
 			Object: obj,
 		})
 	}
 	// delete the entry to ensure the cb uses the proper data
-	r.delete(ctx, key)
+	r.delete(key)
 	return nil
 }
 
-func (r *mem) Watch(ctx context.Context) (watch.Interface[runtime.Unstructured], error) {
-	//r.m.Lock()
-	//defer r.m.Unlock()
+func (r *mem) notifyWatcher(event watch.WatchEvent[runtime.Unstructured]) {
+	r.m.RLock()
+	defer r.m.RUnlock()
+	if r.watching {
+		r.watchermanager.WatchChan() <- event
+	}
+
+}
+
+func (r *mem) Watch(ctx context.Context, opts ...store.ListOption) (watch.WatchInterface[runtime.Unstructured], error) {
+	ctx, cancel := context.WithCancel(ctx)
 
 	log := log.FromContext(ctx)
-	log.Debug("watch memory store")
-	if r.watchers.IsExhausted() {
-		return nil, fmt.Errorf("cannot allocate watcher, out of resources")
-	}
-	w := r.watchers.GetWatchContext()
+	log.Debug("watch")
 
-	// On initial watch, send all the existing objects
-	items := map[store.Key]runtime.Unstructured{}
-	r.List(ctx, func(ctx context.Context, key store.Key, obj runtime.Unstructured) {
-		items[key] = obj
-	})
-	log.Debug("watch list items", "len", len(items))
-	for _, obj := range items {
-		w.ResultCh <- watch.Event[runtime.Unstructured]{
-			Type:   watch.Added,
-			Object: obj,
-		}
+	w := &watcher.WatcherU{
+		Cancel:         cancel,
+		ResultChannel:  make(chan watch.WatchEvent[runtime.Unstructured]),
+		WatcherManager: r.watchermanager,
+		New:            func() runtime.Unstructured { return &unstructured.Unstructured{} },
 	}
-	// this ensures the initial events from the list
-	// get processed first
-	log.Debug("watcher add")
-	if err := r.watchers.Add(w); err != nil {
-		log.Debug("cannot add watcher", "error", err.Error())
-		return nil, err
-	}
-	log.Debug("watcher added")
+
+	go w.ListAndWatch(ctx, r, opts...)
+
 	return w, nil
 }

@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 type Key struct {
+	Branch string
 	types.NamespacedName
 }
 
