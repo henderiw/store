@@ -9,7 +9,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/henderiw/logger v0.0.0-20230911123436-8655829b1abe
 	golang.org/x/sync v0.8.0
-	k8s.io/apimachinery v0.32.0-alpha.2
+	k8s.io/apimachinery v0.31.0
 	sigs.k8s.io/yaml v1.4.0
 )
 
