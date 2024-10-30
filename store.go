@@ -26,35 +26,26 @@ import (
 type Storer[T1 any] interface {
 	// Starting the watcher manager
 	Start(context.Context)
-
 	// Stopping the watcher manager
 	Stop()
 	// Retrieve retrieves data for the given key from the storage
 	Get(key Key, opts ...GetOption) (T1, error)
-
 	// Retrieve retrieves data for the given key from the storage
 	List(visitorFunc func(Key, T1), opts ...ListOption)
-
 	// Retrieve retrieves data for the given key from the storage
 	ListKeys(opts ...ListOption) []string
-
 	// Len returns the # entries in the store
 	Len(opts ...ListOption) int
-
+	// Create data with the given key in the storage irrespective of create/delete
 	Apply(key Key, data T1, opts ...ApplyOption) error
-
 	// Create data with the given key in the storage
 	Create(key Key, data T1, opts ...CreateOption) error
-
 	// Update data with the given key in the storage
 	Update(key Key, data T1, opts ...UpdateOption) error
-
 	// Update data in a concurrent way through a function
 	UpdateWithKeyFn(key Key, updateFunc func(obj T1) T1)
-
 	// Delete deletes data and key from the storage
 	Delete(key Key, opts ...DeleteOption) error
-
 	// Watch watches change
 	Watch(ctx context.Context, opts ...ListOption) (watch.WatchInterface[T1], error)
 }
@@ -62,36 +53,24 @@ type Storer[T1 any] interface {
 type UnstructuredStore interface {
 	// Retrieve retrieves data for the given key from the storage
 	Get(key Key, opts ...GetOption) (runtime.Unstructured, error)
-
 	// Retrieve retrieves data for the given key from the storage
 	List(visitorFunc func(key Key, obj runtime.Unstructured), opts ...ListOption)
-
 	// Retrieve retrieves data for the given key from the storage
 	ListKeys(opts ...ListOption) []string
-
 	// Len returns the # entries in the store
 	Len(opts ...ListOption) int
-
+	// Create data with the given key in the storage irrespective of create/delete 
 	Apply(key Key, obj runtime.Unstructured, opts ...ApplyOption) error
-
 	// Create data with the given key in the storage
 	Create(key Key, obj runtime.Unstructured, opts ...CreateOption) error
-
 	// Update data with the given key in the storage
 	Update(key Key, obj runtime.Unstructured, opts ...UpdateOption) error
-
 	// Update data in a concurrent way through a function
 	UpdateWithKeyFn(key Key, updateFunc func(obj runtime.Unstructured, opts ...UpdateOption) runtime.Unstructured)
-
 	// Delete deletes data and key from the storage
 	Delete(key Key, opts ...DeleteOption) error
-
 	// Watch watches change
 	Watch(ctx context.Context, opts ...ListOption) (watch.WatchInterface[runtime.Unstructured], error)
-}
-
-type BranchUnstructuredStore interface {
-	UnstructuredStore
 }
 
 type GetOption interface {

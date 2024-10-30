@@ -46,7 +46,7 @@ type Config struct {
 	NewFunc       func() runtime.Unstructured
 }
 
-func NewStore(cfg *Config) (store.BranchUnstructuredStore, error) {
+func NewStore(cfg *Config) (store.UnstructuredStore, error) {
 	rootPath := filepath.Join(cfg.RootPath, cfg.GroupResource.Group, cfg.GroupResource.Resource)
 
 	// this is adding the storage to the worktree
